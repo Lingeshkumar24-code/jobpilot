@@ -16,6 +16,7 @@ from app.services.job_sources.credentialed import (
     NaukriConnector,
 )
 from app.services.job_sources.firecrawl import FirecrawlConnector
+from app.services.job_sources.google_browser import GoogleBrowserConnector
 from app.services.job_sources.greenhouse import GreenhouseConnector
 from app.services.job_sources.lever import LeverConnector
 from app.services.job_sources.remoteok import RemoteOKConnector
@@ -28,6 +29,7 @@ CONNECTORS: dict[str, JobSourceConnector] = {
         ArbeitnowConnector(),
         RemotiveConnector(),
         FirecrawlConnector(),
+        GoogleBrowserConnector(),
         GreenhouseConnector(),
         LeverConnector(),
         LinkedInConnector(),

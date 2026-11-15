@@ -109,7 +109,10 @@ async def discover(
             )
         ]
 
-    fetch_limit = min(max(limit * 2, 25), settings.JOB_MAX_RESULTS_PER_SOURCE)
+    # Public feeds are usually ordered by recency, not by the user's query.
+    # Fetch a larger window so filtering a city/role doesn't discard every
+    # result just because the first page contains unrelated listings.
+    fetch_limit = min(max(limit * 10, 100), settings.JOB_MAX_RESULTS_PER_SOURCE)
     tasks = [
         _fetch_one(CONNECTORS[key], filters.model_dump(), fetch_limit, prefs) for key in selected
     ]

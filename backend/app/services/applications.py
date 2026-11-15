@@ -309,15 +309,24 @@ async def analyze_application(
     request: Request | None = None,
 ) -> dict:
     client = client or browser_client
-    if app.status not in {"DISCOVERED", "MATCHED", "APPLICATION_OPENED", "NEEDS_USER_INPUT"}:
+    if app.status not in {"DISCOVERED", "MATCHED", "APPLICATION_OPENED", "NEEDS_USER_INPUT", "FORM_ANALYZED", "FORM_FILLED", "VERIFICATION_PENDING"}:
         raise HTTPException(
             status_code=409, detail=f"Cannot analyze an application in status {app.status}."
         )
+    previous_session = await _active_session(db, app)
+    if previous_session is not None:
+        previous_client = BrowserClient(base_url=previous_session.worker_id or settings.BROWSER_WORKER_URL)
+        await previous_client.close(previous_session.session_ref)
+        previous_session.status = "CLOSED"
+        await db.flush()
     job = await get_job(db, app.job_id)
     version, resume_file = await select_resume(db, user, app)
     if app.resume_version_id != version.id:
         app.resume_version_id = version.id
     resume_bytes = await _resume_bytes(resume_file)
+
+    if app.status in {"FORM_FILLED", "VERIFICATION_PENDING"}:
+        await transition(db, app, "NEEDS_USER_INPUT", actor="user", payload={"reason": "Form inspection was requested again."})
 
     if app.status in {"DISCOVERED", "MATCHED"}:
         await transition(db, app, "APPLICATION_OPENED", actor="browser")
@@ -384,6 +393,7 @@ async def analyze_application(
             "version_number": version.version_number,
         },
         "fields": analysis.get("fields") or [],
+        "application_form_detected": bool((analysis.get("detected") or {}).get("has_application_form")),
         "answers": answers,
         "missing_required": missing,
         "warnings": (analysis.get("warnings") or []) + warnings,
@@ -396,8 +406,16 @@ async def analyze_application(
         await transition(db, app, "CAPTCHA_REQUIRED", actor="browser", payload={"url": job.application_url})
     elif analysis.get("detected", {}).get("requires_login"):
         await transition(db, app, "LOGIN_REQUIRED", actor="browser", payload={"url": job.application_url})
-    else:
+    elif (analysis.get("detected") or {}).get("has_application_form"):
         await transition(db, app, "FORM_ANALYZED", actor="browser")
+    else:
+        await transition(
+            db,
+            app,
+            "NEEDS_USER_INPUT",
+            actor="browser",
+            payload={"reason": "No employer application form was found at this job listing."},
+        )
 
     if analysis.get("detected", {}).get("has_captcha") or analysis.get("detected", {}).get("requires_login"):
         session.status = "BLOCKED"

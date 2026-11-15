@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import {
   Button,
   Card,
@@ -24,7 +25,7 @@ import {
 } from "@/lib/api";
 
 const EDITABLE = new Set(["FORM_FILLED", "VERIFICATION_PENDING", "USER_APPROVAL_PENDING", "NEEDS_USER_INPUT"]);
-const CAN_ANALYZE = new Set(["DISCOVERED", "MATCHED", "APPLICATION_OPENED", "NEEDS_USER_INPUT", "FORM_ANALYZED"]);
+const CAN_ANALYZE = new Set(["DISCOVERED", "MATCHED", "APPLICATION_OPENED", "NEEDS_USER_INPUT", "FORM_ANALYZED", "FORM_FILLED", "VERIFICATION_PENDING"]);
 const CAN_FILL = new Set(["FORM_ANALYZED", "NEEDS_USER_INPUT"]);
 const CAN_REQUEST = new Set(["VERIFICATION_PENDING"]);
 
@@ -52,6 +53,10 @@ export default function AssistantPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [manualEvidence, setManualEvidence] = useState("");
   const [screenshot, setScreenshot] = useState<string | null>(null);
+  const [browserConnected, setBrowserConnected] = useState(false);
+  const [browserDisconnectReason, setBrowserDisconnectReason] = useState<string | null>(null);
+  const browserCanvas = useRef<HTMLCanvasElement>(null);
+  const browserSocket = useRef<WebSocket | null>(null);
 
   async function loadList(preferred?: string) {
     const result = await api.listApplications({ limit: 100 });
@@ -108,6 +113,65 @@ export default function AssistantPage() {
         .catch(() => undefined);
     }
   }, [detail?.id, detail?.screenshot_available]);
+
+  useEffect(() => {
+    if (!detail?.browser_session || detail.browser_session.status === "BLOCKED") return;
+    let active = true;
+    let socket: WebSocket | null = null;
+    const connect = async () => {
+      try {
+        const { ticket } = await api.applicationBrowserStreamTicket(detail.id);
+        if (!active) return;
+        socket = new WebSocket(api.applicationBrowserStreamUrl(detail.id, ticket));
+        browserSocket.current = socket;
+        socket.onopen = () => { if (active) { setBrowserConnected(true); setBrowserDisconnectReason(null); } };
+        socket.onclose = (event) => { if (active) { setBrowserConnected(false); setBrowserDisconnectReason(event.reason || `Connection closed (${event.code})`); } };
+        socket.onerror = () => { if (active) { setBrowserConnected(false); setBrowserDisconnectReason("Could not reach the browser stream."); } };
+        socket.onmessage = (message) => {
+          if (!active || typeof message.data !== "string") return;
+          try {
+            const frame = JSON.parse(message.data);
+            const canvas = browserCanvas.current;
+            const context = canvas?.getContext("2d");
+            if (frame.type === "frame" && canvas && context && typeof frame.data === "string") {
+              const image = new Image();
+              image.onload = () => {
+                if (!active) return;
+                canvas.width = frame.metadata?.deviceWidth || image.naturalWidth;
+                canvas.height = frame.metadata?.deviceHeight || image.naturalHeight;
+                context.drawImage(image, 0, 0, canvas.width, canvas.height);
+                socket?.send(JSON.stringify({ type: "ack", seq: frame.seq }));
+              };
+              image.src = `data:image/jpeg;base64,${frame.data}`;
+            }
+          } catch {
+            // Ignore malformed stream frames and keep the remote session alive.
+          }
+        };
+      } catch {
+        if (active) setBrowserConnected(false);
+      }
+    };
+    void connect();
+    return () => {
+      active = false;
+      setBrowserConnected(false);
+      socket?.close();
+      if (browserSocket.current === socket) browserSocket.current = null;
+    };
+  }, [detail?.id, detail?.browser_session?.status]);
+
+  function sendBrowserInput(event: Record<string, unknown>) {
+    if (browserSocket.current?.readyState === WebSocket.OPEN) browserSocket.current.send(JSON.stringify(event));
+  }
+
+  function browserCoordinates(event: Pick<ReactPointerEvent<HTMLCanvasElement>, "currentTarget" | "clientX" | "clientY">) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.round((event.clientX - rect.left) * event.currentTarget.width / rect.width),
+      y: Math.round((event.clientY - rect.top) * event.currentTarget.height / rect.height),
+    };
+  }
 
   async function choose(id: string) {
     setSelectedId(id);
@@ -310,7 +374,15 @@ export default function AssistantPage() {
                       {busy === "analyze" ? "Inspecting…" : "Inspect form"}
                     </Button>
                   ) : null}
-                  {CAN_FILL.has(detail.status) ? (
+
+                {detail.preview?.application_form_detected === false ? (
+                  <div className="mt-3">
+                    <Notice tone="info">
+                      This page is a job listing, not an employer application form. The browser is open below; use its Apply link if it leads to a real form, then choose “Inspect form” again. JobPilot will not fill listing search fields or claim this job is ready to submit.
+                    </Notice>
+                  </div>
+                ) : null}
+                  {CAN_FILL.has(detail.status) && detail.preview?.application_form_detected !== false ? (
                     <Button
                       size="sm"
                       variant="primary"
@@ -466,10 +538,29 @@ export default function AssistantPage() {
                 </Card>
               ) : null}
 
-              {screenshot ? (
+              {detail.browser_session && detail.browser_session.status !== "BLOCKED" ? (
+                <Card title={browserConnected ? "Live browser · click to control" : browserDisconnectReason ? "Browser disconnected" : "Connecting to browser…"}>
+                  <canvas
+                    ref={browserCanvas}
+                    aria-label="Live remote job application browser. Click here, then use your mouse and keyboard to control it."
+                    tabIndex={0}
+                    className="block w-full rounded border border-line bg-black outline-none focus:ring-2 focus:ring-accent"
+                    style={{ aspectRatio: "16 / 9", objectFit: "contain" }}
+                    onPointerDown={(event) => { event.currentTarget.focus(); event.currentTarget.setPointerCapture(event.pointerId); sendBrowserInput({ type: "input_mouse", eventType: "mousePressed", ...browserCoordinates(event), button: event.button === 2 ? "right" : event.button === 1 ? "middle" : "left", clickCount: 1 }); }}
+                    onPointerUp={(event) => sendBrowserInput({ type: "input_mouse", eventType: "mouseReleased", ...browserCoordinates(event), button: event.button === 2 ? "right" : event.button === 1 ? "middle" : "left" })}
+                    onPointerMove={(event) => { if (event.buttons) sendBrowserInput({ type: "input_mouse", eventType: "mouseMoved", ...browserCoordinates(event) }); }}
+                    onContextMenu={(event) => event.preventDefault()}
+                    onWheel={(event) => { const point = browserCoordinates(event); sendBrowserInput({ type: "input_mouse", eventType: "mouseWheel", ...point, deltaX: event.deltaX, deltaY: event.deltaY }); }}
+                    onKeyDown={(event) => { event.preventDefault(); if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) sendBrowserInput({ type: "input_keyboard", eventType: "char", text: event.key }); else sendBrowserInput({ type: "input_keyboard", eventType: "keyDown", key: event.key, code: event.code }); }}
+                    onKeyUp={(event) => { if (event.key.length !== 1 || event.ctrlKey || event.altKey || event.metaKey) sendBrowserInput({ type: "input_keyboard", eventType: "keyUp", key: event.key, code: event.code }); }}
+                  />
+                  <p className="mt-2 text-xs text-muted">The agent and you share this browser session. Click the page to focus it, then use the mouse or keyboard. Application submission still needs your separate approval.</p>
+                  {browserDisconnectReason ? <p className="mt-2 text-xs text-danger">{browserDisconnectReason} Try “Inspect form” to start a fresh browser session.</p> : null}
+                </Card>
+              ) : screenshot ? (
                 <Card title="Last screenshot">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={screenshot} alt="Application page screenshot" className="w-full rounded border border-line" />
+                  <img src={screenshot} alt="Application browser view" className="w-full rounded border border-line" />
                 </Card>
               ) : null}
 

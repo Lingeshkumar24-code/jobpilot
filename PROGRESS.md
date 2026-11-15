@@ -6,16 +6,16 @@ been deployed or verified.
 
 | Master phase | Status | Evidence / remaining work |
 |---|---|---|
-| 1. Repository foundation | Partial | App, Dockerfiles, Compose, models and migration exist. No Git metadata is present in this workspace; project history cannot be checked. |
+| 1. Repository foundation | Partial | App, Dockerfiles, Compose, models and migrations exist. Git history is present on `master` with `origin` set to the JobPilot GitHub repository. |
 | 2. Frontend dashboard | Partial | Responsive dashboard routes exist; overview uses live API. Review mobile/accessibility and remove unused sample-data fixture. |
 | 3. Authentication/profile | Implemented locally | Cookie auth, profile CRUD, user-scoped API. Backend suite passes. Production deployment not verified. |
 | 4. Resume management | Implemented locally | PDF/DOCX validation, private local/S3 storage, deterministic parsing with optional grounded LLM refinement, profile update, versions and downloads. AWS S3 path not live-tested. |
 | 5. Natural language search | Implemented locally | Rule-based parsing, optional LLM refinement, filter validation, refinement and saved history. OpenRouter integration and the configured local key have been exercised. |
-| 6. Job sources | Partial | Public feeds, Greenhouse/Lever connectors, and Firecrawl web search are implemented. Firecrawl results are restricted to identifiable job detail pages; broad board/search pages are discarded. Role filtering checks titles. LinkedIn/Indeed/Naukri official API credentials and source-specific connectors remain; Wellfound/company-page connectors remain. |
+| 6. Job sources | Partial | Remote OK, Arbeitnow and Remotive returned listings in the live local search. LinkedIn/Indeed/Naukri official API connectors remain disabled without authorized credentials. Google search stopped at CAPTCHA. The tested “AI jobs in Bengaluru” query returned many remote or non-Bengaluru roles, so location precision still needs work. |
 | 7. LangGraph agents | Partial | Graph, interrupt, audit and approval pause exist. Checkpoint saver is in-memory, not durable. Not all nine roles are independent agents. |
 | 8. Matching | Implemented locally | Explainable weighted deterministic scoring, optional embeddings. pgvector is not enabled. |
 | 9. n8n workflows | Partial | Six JSON exports now exist and API supports signed webhooks. Resume workflow is intentionally disabled; no email/push notification, n8n auth hardening, live import or live schedule verification. |
-| 10. Browser automation | Partial | Isolated Playwright worker code supports form analysis/fill, screenshots, CAPTCHA/login detection and signed one-time approval. Container entry point now targets the real worker app. Local browser worker was unreachable during the UI session because Docker is unavailable; the current application preview could not be inspected. |
+| 10. Browser automation | Partial | Local isolated Playwright worker responds to health checks. Search browser opens Google/LinkedIn/Indeed and streams a live view; manual sign-in/CAPTCHA remain user steps. A bounded Nemotron visual mouse path is implemented with an OpenRouter screenshot opt-in and final-submit guard, but has not yet been live-verified after the JobPilot session expired. Employer form detection/fill and real submission remain site-dependent. |
 | 11. Approval center | Implemented locally | Preview/edit/reject/approval actions and one-time application-bound proof. |
 | 12. Application tracking | Partial | Application states/events/outcomes and evidence-gated confirmation exist. External employer updates require user confirmation; no notification integration. |
 | 13. Docker/local integration | Partial | Compose and service Dockerfiles exist. Full compose boot and end-to-end integration have not been verified in this review. |
@@ -25,7 +25,7 @@ been deployed or verified.
 | 17. CI/CD | Partial | CI and manual/tag deploy workflows exist. OIDC role and GitHub environment variables/secrets must be configured; pipeline has not run against AWS. |
 | 18. Security/performance | Partial | Several application safeguards exist; full security review, vulnerability scan, load/performance checks and deployment hardening remain. |
 | 19. Production readiness | Pending | HTTPS certificate, production secrets, durable checkpoints/queue, migration strategy, monitoring, backup/restore rehearsal, cost controls and live deployment verification remain. |
-| 20. Documentation/final verification | Partial | Core and AWS guides updated; install/deploy steps still need validation against live environment and remaining architecture. |
+| 20. Documentation/final verification | Partial | Core and AWS guides updated; browser workflow and captured screenshots are in `docs/browser-search-workflow.md` and `docs/screenshots/`. Install/deploy steps still need validation against live AWS and remaining architecture. |
 
 ## Verification performed in this review
 
@@ -72,9 +72,11 @@ been deployed or verified.
   - 15. Tested duplicate submission replay with the same proof: blocked with HTTP 409 Conflict.
 - Frontend verification:
   - TypeScript type check (`npx tsc --noEmit`): **0 errors**
-  - Production build (`npm run build`): **Compiled successfully (15/15 static routes generated)**
+  - Production build (`npm run build`): **Compiled successfully (15/15 static routes generated)** for the search UI. A later rebuild was interrupted while restoring local static assets; run one clean production build before release. The local Next.js dev server is currently serving port 3000.
+  - Browser-search route screenshots and observed provider blocks: see [`docs/browser-search-workflow.md`](docs/browser-search-workflow.md) and `docs/screenshots/`.
+  - Backend/browser-worker visual actions passed Python compilation; the Nemotron screenshot-to-mouse path requires explicit screenshot-sharing opt-in and still needs an authenticated live run.
 - Git repository:
-  - Initialized with remote `https://github.com/Lingeshkumar24-code/jobpilot.git` on branch `master`.
+  - Branch `master` tracks `origin/master` at `https://github.com/Lingeshkumar24-code/jobpilot.git`.
 - Security & configuration:
   - Fixed `_update_existing` attribute name bug in `app/services/discovery.py`.
   - Fixed `run_agent` node completion status and error propagation in `app/agents/graph.py`.
@@ -83,7 +85,7 @@ been deployed or verified.
   - Documented n8n workflow catalogue and configuration in `n8n/README.md`.
 - Deployments & AWS:
   - No AWS resources were created or destroyed.
-  - No remote git push performed (requires user's GitHub credentials).
+  - No AWS deployment was performed in this workflow.
 
 ## External setup still needed
 

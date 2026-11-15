@@ -16,8 +16,10 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import json
 import logging
 import os
+import re
 import socket
 import sqlite3
 import tempfile
@@ -26,9 +28,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from websockets.asyncio.client import connect as websocket_connect
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +81,7 @@ CAPTCHA_PATTERNS = ("captcha", "i'm not a robot", "i am not a robot", "recaptcha
 FIELD_JS = """
 () => {
   const refs = [];
-  const elements = Array.from(document.querySelectorAll('input, textarea, select'));
+  const allElements = Array.from(document.querySelectorAll('input, textarea, select'));
   let index = 0;
   const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim().slice(0, 300);
   const labelFor = (el) => {
@@ -103,6 +106,23 @@ FIELD_JS = """
     }
     return clean(el.name || el.id);
   };
+  const applicationCue = /\\b(first name|last name|full name|email|phone|resume|curriculum vitae|cv|cover letter|linkedin|portfolio|salary expectation|salary requirement|work authorization|notice period|experience|website|github|candidate)\\b/i;
+  const visible = (el) => el.offsetParent !== null || (el.getAttribute('type') || '').toLowerCase() === 'file';
+  const forms = Array.from(document.querySelectorAll('form')).filter(visible).map(form => {
+    const controls = Array.from(form.querySelectorAll('input, textarea, select')).filter(visible);
+    const cues = controls.filter(el => applicationCue.test(labelFor(el))).length;
+    const hasFile = controls.some(el => (el.getAttribute('type') || '').toLowerCase() === 'file');
+    const context = clean(form.innerText).toLowerCase();
+    const applicationContext = /\\b(apply|application|candidate|job application)\\b/.test(context);
+    return {controls, cues, isApplication: cues >= 2 || (hasFile && controls.length >= 2) || (applicationContext && cues >= 1 && controls.length >= 2)};
+  }).filter(item => item.isApplication).sort((a, b) => b.cues - a.cues);
+  let elements = forms.length ? forms[0].controls : [];
+  if (!elements.length && !document.querySelector('form')) {
+    const controls = allElements.filter(visible);
+    const cues = controls.filter(el => applicationCue.test(labelFor(el)));
+    if (cues.length >= 2 || (controls.some(el => (el.getAttribute('type') || '').toLowerCase() === 'file') && controls.length >= 2)) elements = controls;
+  }
+  const hasApplicationForm = elements.length > 0;
   for (const el of elements) {
     const type = (el.getAttribute('type') || el.tagName || '').toLowerCase();
     if (['hidden', 'submit', 'button', 'reset', 'image'].includes(type)) continue;
@@ -136,7 +156,22 @@ FIELD_JS = """
   const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'))
     .filter(b => b.offsetParent !== null)
     .map(b => clean(b.innerText || b.value || ''));
-  return {fields: refs, hasCaptcha, hasPassword, buttons};
+  return {fields: refs, hasCaptcha, hasPassword, hasApplicationForm, buttons};
+}
+"""
+
+APPLY_LINK_JS = """
+() => {
+  const clean = value => (value || '').replace(/\\s+/g, ' ').trim().slice(0, 160);
+  return Array.from(document.querySelectorAll('a[href]'))
+    .filter(a => a.offsetParent !== null)
+    .map(a => ({text: clean(a.innerText || a.getAttribute('aria-label') || a.title), href: a.href}))
+    .filter(a => /^https?:/i.test(a.href) && /\\bapply\\b|application/i.test(a.text))
+    .sort((a, b) => {
+      const rank = item => /\\bapply now\\b/i.test(item.text) ? 0 : /\\bapply for this job\\b/i.test(item.text) ? 1 : /\\bapply\\b/i.test(item.text) ? 2 : 3;
+      return rank(a) - rank(b);
+    })
+    .slice(0, 8);
 }
 """
 
@@ -144,11 +179,15 @@ VALIDATION_JS = """
 () => {
   const messages = [];
   const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim().slice(0, 300);
-  for (const el of document.querySelectorAll('[aria-invalid="true"], .error, .field-error, .invalid-feedback, [role="alert"]')) {
+  const form = Array.from(document.forms).find(candidate => candidate.querySelector('[data-jobpilot-ref]'));
+  const fields = Array.from(document.querySelectorAll('[data-jobpilot-ref]'));
+  if (!fields.length) return messages;
+  const root = form || document;
+  for (const el of root.querySelectorAll('[aria-invalid="true"], .error, .field-error, .invalid-feedback')) {
     const text = clean(el.innerText);
     if (text && text.length > 1) messages.push(text);
   }
-  for (const el of document.querySelectorAll('input, textarea, select')) {
+  for (const el of fields) {
     if (el.willValidate && !el.validity.valid) {
       const label = el.getAttribute('aria-label') || el.name || el.id || el.tagName;
       messages.push(`${label}: ${el.validationMessage || 'invalid value'}`);
@@ -171,6 +210,9 @@ class Session:
     application_id: str
     page: Page
     context: BrowserContext
+    browser: Browser
+    agent_session: str
+    stream_port: int
     fields: list[dict]
     resume_path: str | None
     resume_filename: str | None
@@ -186,6 +228,7 @@ class BrowserAutomation:
     def __init__(self) -> None:
         self._playwright = None
         self.browser: Browser | None = None
+        self.chrome_executable_path: str | None = None
         self.sessions: dict[str, Session] = {}
         self._lock = asyncio.Lock()
         self._init_nonce_db()
@@ -207,17 +250,165 @@ class BrowserAutomation:
 
     async def start(self) -> None:
         self._playwright = await async_playwright().start()
-        self.browser = await self._playwright.chromium.launch(
-            headless=True,
-            args=["--disable-dev-shm-usage", "--no-sandbox"],
+        self.chrome_executable_path = self._playwright.chromium.executable_path
+        logger.info("Playwright CDP client started")
+
+    async def search_google(self, query: str, limit: int = 20) -> dict:
+        """Search Google in an isolated agent-browser Chrome session."""
+        session_name = f"jp-search-{uuid.uuid4().hex}"
+        try:
+            await self._agent_browser(
+                session_name,
+                "open",
+                f"https://www.google.com/search?q={quote_plus(query)}&num={max(1, min(limit, 50))}",
+            )
+            observed = await self._agent_browser(
+                session_name,
+                "eval",
+                "({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,4000)})",
+            )
+            page_info = observed.get("result") or {}
+            page_text = str(page_info.get("text") or "").lower()
+            if "google.com/sorry" in str(page_info.get("url") or "") or "unusual traffic" in page_text or "captcha" in page_text:
+                raise WorkerError("Google requires a CAPTCHA. Search stopped for manual review.", status=503)
+            extracted = await self._agent_browser(
+                session_name,
+                "eval",
+                """(() => {
+                  const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                  const out = [];
+                  const seen = new Set();
+                  for (const heading of document.querySelectorAll('a h3')) {
+                    const link = heading.closest('a');
+                    const url = link?.href;
+                    if (!url || !/^https?:/.test(url) || seen.has(url)) continue;
+                    const root = heading.closest('div.MjjYud') || heading.parentElement?.parentElement;
+                    const text = clean(root?.innerText || '');
+                    seen.add(url);
+                    out.push({title: clean(heading.innerText), url, snippet: text.slice(0, 900)});
+                    if (out.length >= 50) break;
+                  }
+                  return out;
+                })()""",
+            )
+            return {
+                "query": query,
+                "results": extracted.get("result") or [],
+                "url": page_info.get("url"),
+            }
+        except WorkerError:
+            raise
+        except Exception as exc:
+            logger.warning("agent-browser search failed: %s", type(exc).__name__)
+            raise WorkerError("Google browser search failed.", status=502) from exc
+        finally:
+            try:
+                await self._agent_browser(session_name, "close")
+            except Exception:
+                pass
+
+    async def open_job_search(self, provider: str, query: str) -> dict:
+        """Open a private, user-controlled browser tab at a job search page."""
+        provider = provider.lower().strip()
+        encoded = quote_plus(query.strip())
+        search_urls = {
+            "google": f"https://www.google.com/search?q={encoded}",
+            "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={encoded}",
+            "indeed": f"https://www.indeed.com/jobs?q={encoded}",
+        }
+        if provider not in search_urls:
+            raise WorkerError("Choose Google, LinkedIn, or Indeed.")
+        await self._gc()
+        if len(self.sessions) >= MAX_SESSIONS:
+            raise WorkerError("Browser worker is at capacity. Try again shortly.", status=429)
+        session_key = uuid.uuid4().hex
+        agent_session = f"jp-user-search-{session_key}"
+        try:
+            opened = await self._agent_browser(agent_session, "open", search_urls[provider])
+            cdp = await self._agent_browser(agent_session, "get", "cdp-url")
+            browser = await self._playwright.chromium.connect_over_cdp(cdp["cdpUrl"])
+            if not browser.contexts or not browser.contexts[0].pages:
+                raise WorkerError("Search browser did not open a page.", status=502)
+            context = browser.contexts[0]
+            page = context.pages[0]
+            page.set_default_timeout(NAV_TIMEOUT_MS)
+            await page.wait_for_timeout(700)
+            stream = await self._agent_browser(agent_session, "stream", "status")
+            stream_port = stream.get("port")
+            if not isinstance(stream_port, int) or not 1 <= stream_port <= 65535:
+                raise WorkerError("agent-browser did not expose a live browser stream.", status=502)
+            session_id = uuid.uuid4().hex
+            self.sessions[session_id] = Session(
+                id=session_id,
+                application_id=session_key,
+                page=page,
+                context=context,
+                browser=browser,
+                agent_session=agent_session,
+                stream_port=stream_port,
+                fields=[],
+                resume_path=None,
+                resume_filename=None,
+                url=search_urls[provider],
+            )
+            return {
+                "session_id": session_id,
+                "session_key": session_key,
+                "provider": provider,
+                "query": query,
+                "url": page.url or opened.get("url") or search_urls[provider],
+                "title": await page.title(),
+                "stream_port": stream_port,
+                "screenshot": await self._screenshot(page),
+            }
+        except WorkerError:
+            await self._agent_browser(agent_session, "close")
+            raise
+        except Exception as exc:
+            try:
+                await self._agent_browser(agent_session, "close")
+            except Exception:
+                pass
+            logger.warning("Browser job search failed: %s", type(exc).__name__)
+            raise WorkerError("Could not open the job search browser.", status=502) from exc
+
+    async def _agent_browser(self, session_name: str, *args: str) -> dict:
+        script = Path(os.getenv(
+            "AGENT_BROWSER_SCRIPT",
+            str(Path(__file__).resolve().parent / "node_modules" / "agent-browser" / "bin" / "agent-browser.js"),
+        ))
+        if not script.is_file():
+            raise WorkerError("agent-browser is not installed in the browser worker.", status=503)
+        command = [os.getenv("NODE_BINARY", "node"), str(script), "--session", session_name]
+        if self.chrome_executable_path:
+            command.extend(["--executable-path", self.chrome_executable_path])
+        if os.name != "nt":
+            command.extend(["--args", "--no-sandbox,--disable-dev-shm-usage"])
+        command.extend(["--json", *args])
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        logger.info("Chromium started")
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise WorkerError("agent-browser command timed out.", status=504) from exc
+        try:
+            payload = json.loads(stdout.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning("agent-browser returned invalid JSON: %s", stderr.decode("utf-8", errors="replace")[:300])
+            raise WorkerError("agent-browser returned an invalid response.", status=502) from exc
+        if process.returncode or not payload.get("success"):
+            detail = payload.get("error") or stderr.decode("utf-8", errors="replace")[:300]
+            raise WorkerError(str(detail or "agent-browser command failed."), status=502)
+        return payload.get("data") or {}
 
     async def stop(self) -> None:
         for session in list(self.sessions.values()):
             await self._close_session(session)
-        if self.browser:
-            await self.browser.close()
         if self._playwright:
             await self._playwright.stop()
 
@@ -233,16 +424,6 @@ class BrowserAutomation:
         async with self._lock:
             if len(self.sessions) >= MAX_SESSIONS:
                 raise WorkerError("Browser worker is at capacity. Try again shortly.", status=429)
-            context = await self.browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                locale="en-IN",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 JobPilotAI/1.0"
-                ),
-            )
-            page = await context.new_page()
-            page.set_default_timeout(NAV_TIMEOUT_MS)
             resume_path = None
             if resume:
                 suffix = Path(resume_filename or "resume.pdf").suffix or ".pdf"
@@ -250,17 +431,34 @@ class BrowserAutomation:
                 handle.write(resume)
                 handle.close()
                 resume_path = handle.name
+            agent_session = "jp-application-" + re.sub(r"[^a-zA-Z0-9_-]", "", application_id)
             try:
-                response = await page.goto(url, wait_until="domcontentloaded")
+                opened = await self._agent_browser(agent_session, "open", url)
+                cdp = await self._agent_browser(agent_session, "get", "cdp-url")
+                browser = await self._playwright.chromium.connect_over_cdp(cdp["cdpUrl"])
+                if not browser.contexts:
+                    raise WorkerError("agent-browser did not create a Chrome context.", status=502)
+                context = browser.contexts[0]
+                target_url = opened.get("url") or url
+                page = next((candidate for candidate in context.pages if candidate.url == target_url), None)
+                if page is None:
+                    raise WorkerError("Could not attach to the active agent-browser tab.", status=502)
+                page.set_default_timeout(NAV_TIMEOUT_MS)
                 await page.wait_for_timeout(700)
-                if response is not None and response.status >= 400:
-                    raise WorkerError(f"Application page returned HTTP {response.status}.", status=502)
+                await self._navigate_to_application_target(page, url)
                 detected = await page.evaluate(FIELD_JS)
+                stream = await self._agent_browser(agent_session, "stream", "status")
+                stream_port = stream.get("port")
+                if not isinstance(stream_port, int) or not 1 <= stream_port <= 65535:
+                    raise WorkerError("agent-browser did not expose a live browser stream.", status=502)
                 session = Session(
                     id=uuid.uuid4().hex,
                     application_id=application_id,
                     page=page,
                     context=context,
+                    browser=browser,
+                    agent_session=agent_session,
+                    stream_port=stream_port,
                     fields=detected["fields"],
                     resume_path=resume_path,
                     resume_filename=resume_filename,
@@ -276,11 +474,13 @@ class BrowserAutomation:
                     "url": url,
                     "final_url": page.url,
                     "title": await page.title(),
+                    "stream_port": stream_port,
                     "fields": detected["fields"],
                     "buttons": detected["buttons"],
                     "detected": {
                         "has_captcha": session.captcha,
                         "requires_login": session.login,
+                        "has_application_form": bool(detected.get("hasApplicationForm")),
                         "file_inputs": sum(1 for f in detected["fields"] if f["type"] == "file"),
                         "sensitive_fields": [
                             f["ref"] for f in detected["fields"] if is_sensitive(f)
@@ -291,16 +491,17 @@ class BrowserAutomation:
                         for warning in (
                             "CAPTCHA detected. Automation stops; complete it yourself." if session.captcha else None,
                             "A password field was detected. This looks like a login wall." if session.login else None,
+                            "No employer application form was found at this job listing. Use the visible Apply link or choose another listing." if not detected.get("hasApplicationForm") else None,
                         )
                         if warning
                     ],
                     "screenshot": screenshot,
                 }
             except WorkerError:
-                await context.close()
+                await self._agent_browser(agent_session, "close")
                 raise
             except Exception as exc:
-                await context.close()
+                await self._agent_browser(agent_session, "close")
                 logger.warning("Analyze failed: %s", type(exc).__name__)
                 raise WorkerError(f"Could not analyze the application page ({type(exc).__name__}).", status=502) from exc
 
@@ -495,10 +696,190 @@ class BrowserAutomation:
         if session:
             await self._close_session(session)
 
+    async def screenshot(self, session_id: str) -> dict:
+        session = self._get(session_id)
+        return await self._screenshot(session.page)
+
+    async def browser_action(self, session_id: str, event: dict) -> dict:
+        """Apply one bounded mouse/keyboard action to a user-controlled page."""
+        session = self._get(session_id)
+        self._validate_stream_event(event)
+        kind = event["type"]
+        if kind == "input_mouse":
+            action = event["eventType"]
+            x, y = float(event.get("x", 0)), float(event.get("y", 0))
+            if action == "mouseMoved":
+                await session.page.mouse.move(x, y)
+            elif action == "mousePressed":
+                target = await session.page.evaluate(
+                    """([x, y]) => {
+                      const node = document.elementFromPoint(x, y);
+                      const control = node?.closest('button,a,[role=button],input[type=submit],input[type=button]') || node;
+                      return {
+                        text: (control?.innerText || control?.getAttribute('aria-label') || control?.value || '').trim(),
+                        type: control?.getAttribute('type') || '',
+                        tag: control?.tagName || ''
+                      };
+                    }""",
+                    [x, y],
+                )
+                if str(target.get("type", "")).lower() == "submit" or re.search(
+                    r"submit|send application|accept terms|confirm application|finish application|complete application",
+                    str(target.get("text", "")),
+                    re.I,
+                ):
+                    raise WorkerError("Stopped before a final application or terms control.", status=409)
+                await session.page.mouse.click(x, y, button=event.get("button", "left"))
+            elif action == "mouseWheel":
+                await session.page.mouse.wheel(float(event.get("deltaX", 0)), float(event.get("deltaY", 0)))
+        elif kind == "input_keyboard":
+            if event["eventType"] == "char":
+                await session.page.keyboard.insert_text(str(event.get("text", "")))
+            elif event["eventType"] == "keyDown":
+                await session.page.keyboard.down(str(event["key"]))
+            else:
+                await session.page.keyboard.up(str(event["key"]))
+        else:
+            raise WorkerError("This browser action is not supported.")
+        await session.page.wait_for_timeout(350)
+        session.last_used = time.time()
+        return {
+            "url": session.page.url,
+            "title": await session.page.title(),
+            "screenshot": await self._screenshot(session.page),
+        }
+
+    async def _navigate_to_application_target(self, page: Page, original_url: str) -> None:
+        """Follow one visible Apply link when a source listing points to an employer form."""
+        try:
+            existing = await page.evaluate(FIELD_JS)
+            if existing.get("hasApplicationForm"):
+                return
+            links = await page.evaluate(APPLY_LINK_JS)
+            target = next((item for item in links if item.get("href") and item["href"].rstrip("/") != page.url.rstrip("/")), None)
+            if target:
+                assert_safe_url(target["href"], ALLOW_PRIVATE_TARGETS)
+                await page.goto(target["href"], wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                logger.info("Followed application link from %s to %s", original_url, page.url)
+            await self._activate_application_form_tab(page)
+        except WorkerError:
+            raise
+        except Exception as exc:
+            logger.info("Could not follow application link from %s: %s", original_url, type(exc).__name__)
+
+    async def _activate_application_form_tab(self, page: Page) -> None:
+        """Dismiss only necessary-cookie notices and reveal a clearly labelled Apply tab."""
+        necessary = page.get_by_role("button", name=re.compile(r"^agree to necessary$", re.I))
+        if await necessary.count() and await necessary.first.is_visible():
+            await necessary.first.click()
+            await page.wait_for_timeout(250)
+
+        tabs = page.locator('button[aria-selected="false"]')
+        for index in range(await tabs.count()):
+            tab = tabs.nth(index)
+            try:
+                text = (await tab.inner_text()).strip().lower()
+                if text == "apply" and await tab.is_visible():
+                    await tab.click()
+                    await page.wait_for_timeout(350)
+                    break
+            except Exception:
+                continue
+
+    async def browser_stream(self, session_id: str, websocket) -> None:
+        """Proxy agent-browser's live viewport and mouse/keyboard input."""
+        session = self._get(session_id)
+        try:
+            async with websocket_connect(
+                f"ws://127.0.0.1:{session.stream_port}/?pacing=ack&maxFps=12"
+            ) as upstream:
+                async def frames() -> None:
+                    while True:
+                        await websocket.send_text(await upstream.recv())
+                        session.last_used = time.time()
+
+                async def inputs() -> None:
+                    while True:
+                        message = await websocket.receive_text()
+                        try:
+                            event = json.loads(message)
+                        except json.JSONDecodeError as exc:
+                            raise WorkerError("Invalid browser input message.") from exc
+                        self._validate_stream_event(event)
+                        kind = event["type"]
+                        if kind == "input_mouse":
+                            action = event["eventType"]
+                            x, y = float(event.get("x", 0)), float(event.get("y", 0))
+                            if action == "mouseMoved":
+                                await session.page.mouse.move(x, y)
+                            elif action == "mousePressed":
+                                await session.page.mouse.move(x, y)
+                                await session.page.mouse.down(button=event.get("button", "left"))
+                            elif action == "mouseReleased":
+                                # click() already releases the button; preserve explicit release for drags.
+                                await session.page.mouse.up(button=event.get("button", "left"))
+                            elif action == "mouseWheel":
+                                await session.page.mouse.wheel(
+                                    float(event.get("deltaX", 0)), float(event.get("deltaY", 0))
+                                )
+                        elif kind == "input_keyboard":
+                            if event["eventType"] == "char":
+                                await session.page.keyboard.insert_text(str(event.get("text", "")))
+                            elif event["eventType"] == "keyDown":
+                                await session.page.keyboard.down(str(event["key"]))
+                            else:
+                                await session.page.keyboard.up(str(event["key"]))
+                        else:
+                            await upstream.send(json.dumps(event))
+
+                tasks = [asyncio.create_task(frames()), asyncio.create_task(inputs())]
+                try:
+                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        exception = task.exception()
+                        if exception:
+                            raise exception
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as exc:
+            if isinstance(exc, WorkerError):
+                raise
+            logger.info("Browser viewport websocket closed: %s", type(exc).__name__)
+
+    @staticmethod
+    def _validate_stream_event(event: dict) -> None:
+        if not isinstance(event, dict):
+            raise WorkerError("Invalid browser input message.")
+        if event.get("type") == "ack":
+            if not isinstance(event.get("seq"), int):
+                raise WorkerError("Invalid browser frame acknowledgement.")
+            return
+        if event.get("type") == "config":
+            if event.get("pacing") not in {None, "ack", "push"}:
+                raise WorkerError("Invalid browser stream configuration.")
+            return
+        if event.get("type") == "input_mouse":
+            if event.get("eventType") not in {"mousePressed", "mouseReleased", "mouseMoved", "mouseWheel"}:
+                raise WorkerError("Unsupported mouse event.")
+            for key in ("x", "y", "deltaX", "deltaY"):
+                if key in event and (not isinstance(event[key], (int, float)) or abs(event[key]) > 10000):
+                    raise WorkerError("Mouse coordinates are invalid.")
+            return
+        if event.get("type") == "input_keyboard":
+            if event.get("eventType") not in {"keyDown", "keyUp", "char"}:
+                raise WorkerError("Unsupported keyboard event.")
+            if "text" in event and len(str(event["text"])) > 2000:
+                raise WorkerError("Keyboard input is too long.")
+            return
+        raise WorkerError("Unsupported browser input.")
+
     async def stats(self) -> dict:
         await self._gc()
         return {
-            "browser": self.browser is not None,
+            "browser": self._playwright is not None,
             "sessions": len(self.sessions),
             "max_sessions": MAX_SESSIONS,
             "allow_private_targets": ALLOW_PRIVATE_TARGETS,
@@ -518,7 +899,11 @@ class BrowserAutomation:
 
     async def _close_session(self, session: Session) -> None:
         try:
-            await session.context.close()
+            await self._agent_browser(session.agent_session, "close")
+        except Exception:
+            pass
+        try:
+            await session.browser.close()
         except Exception:
             pass
         if session.resume_path:

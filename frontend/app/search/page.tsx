@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { JobCard } from "@/components/JobCard";
+import { LiveBrowser } from "@/components/live-browser";
 import { Button, Card, Empty, Input, Notice, PageHeader, Spinner, timeAgo } from "@/components/ui";
 import {
   api,
@@ -61,6 +62,11 @@ export default function SearchPage() {
   const [applying, setApplying] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [browserSession, setBrowserSession] = useState<{ session_id: string; provider: "google" | "linkedin" | "indeed"; query: string; url: string; ticket: string } | null>(null);
+  const [browserOpening, setBrowserOpening] = useState<string | null>(null);
+  const [browserDriving, setBrowserDriving] = useState(false);
+  const [allowBrowserVision, setAllowBrowserVision] = useState(false);
+  const [browserActionResult, setBrowserActionResult] = useState<{ outcome: string; steps: { action: string; target: string; reason: string }[]; screenshot?: string | null } | null>(null);
 
   useEffect(() => {
     const initial = new URLSearchParams(window.location.search).get("q");
@@ -110,6 +116,41 @@ export default function SearchPage() {
       setError(err instanceof Error ? err.message : "Search failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openProviderBrowser(target: "google" | "linkedin" | "indeed") {
+    if (query.trim().length < 3) return;
+    setBrowserOpening(target);
+    setError(null);
+    try {
+      const session = await api.openBrowserSearch(target, query.trim());
+      setBrowserSession({ session_id: session.session_id, provider: target, query: session.query, url: session.url, ticket: session.ticket });
+      setAllowBrowserVision(false);
+      setBrowserActionResult(null);
+      setNotice(`Opened ${target === "google" ? "Google" : target === "linkedin" ? "LinkedIn" : "Indeed"} for “${session.query}”. Sign in in the browser if it asks.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not open the browser search");
+    } finally {
+      setBrowserOpening(null);
+    }
+  }
+
+  async function letAgentDriveBrowser() {
+    if (!browserSession) return;
+    setBrowserDriving(true);
+    setError(null);
+    try {
+      const result = await api.driveBrowserSearch(browserSession.ticket, allowBrowserVision);
+      setBrowserActionResult({
+        outcome: result.outcome,
+        steps: result.steps,
+        screenshot: result.screenshot?.base64 ? `data:${result.screenshot.mime};base64,${result.screenshot.base64}` : null,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The visual browser agent could not continue");
+    } finally {
+      setBrowserDriving(false);
     }
   }
 
@@ -195,6 +236,45 @@ export default function SearchPage() {
           </div>
         ) : null}
       </Card>
+
+      <Card title="Search directly in a browser">
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="ghost" disabled={query.trim().length < 3 || !!browserOpening} onClick={() => openProviderBrowser("google")}>
+            {browserOpening === "google" ? "Opening…" : "Open Google"}
+          </Button>
+          <Button type="button" variant="ghost" disabled={query.trim().length < 3 || !!browserOpening} onClick={() => openProviderBrowser("linkedin")}>
+            {browserOpening === "linkedin" ? "Opening…" : "Open LinkedIn"}
+          </Button>
+          <Button type="button" variant="ghost" disabled={query.trim().length < 3 || !!browserOpening} onClick={() => openProviderBrowser("indeed")}>
+            {browserOpening === "indeed" ? "Opening…" : "Open Indeed"}
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-muted">For example, enter “AI jobs in Bengaluru” above. This opens a user controlled browser session; provider sign in and any security check stay with you.</p>
+      </Card>
+
+      {browserSession ? (
+        <>
+          <Card title="Visual browser agent">
+            <p className="mb-3 text-xs text-muted">Nemotron can use visible mouse clicks to open a relevant job and reach its application form. It stops at sign-in, CAPTCHA, personal data, or the final submit step.</p>
+            <label className="mb-3 flex items-start gap-2 text-xs text-muted">
+              <input type="checkbox" checked={allowBrowserVision} onChange={(event) => setAllowBrowserVision(event.target.checked)} />
+              Send screenshots of this browser page, which may show account details, to OpenRouter/Nemotron for visual guidance.
+            </label>
+            <Button type="button" variant="primary" disabled={browserDriving || !allowBrowserVision} onClick={letAgentDriveBrowser}>
+              {browserDriving ? "Agent using the browser…" : "Let AI use the mouse"}
+            </Button>
+            {browserActionResult ? (
+              <div className="mt-3 space-y-1 text-xs text-muted" aria-live="polite">
+                <p className="text-paper">{browserActionResult.outcome}</p>
+                {browserActionResult.steps.map((step, index) => (
+                  <p key={`${step.action}-${index}`}>{index + 1}. {step.action}: {step.target || step.reason}</p>
+                ))}
+              </div>
+            ) : null}
+          </Card>
+          <LiveBrowser url={api.browserSearchStreamUrl(browserSession.ticket)} label={`${browserSession.provider} · ${browserSession.query}`} snapshot={browserActionResult?.screenshot} />
+        </>
+      ) : null}
 
       {error ? <Notice>{error}</Notice> : null}
       {notice && !warnings.length ? <Notice tone="success">{notice}</Notice> : null}

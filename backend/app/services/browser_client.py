@@ -105,6 +105,24 @@ class BrowserClient:
             }
         return await self._request("POST", "/v1/sessions/analyze", payload)
 
+    async def google_search(self, query: str, limit: int = 25) -> dict:
+        return await self._request(
+            "POST", "/v1/search/google", {"query": query, "limit": limit}
+        )
+
+    async def open_browser_search(self, provider: str, query: str) -> dict:
+        return await self._request(
+            "POST", "/v1/browser/search", {"provider": provider, "query": query}
+        )
+
+    async def browser_search_action(self, session_id: str, event: dict) -> dict:
+        return await self._request(
+            "POST", f"/v1/browser/search/{session_id}/action", {"event": event}
+        )
+
+    async def screenshot(self, session_id: str) -> dict:
+        return await self._request("GET", f"/v1/sessions/{session_id}/screenshot")
+
     async def fill(self, session_id: str, values: dict[str, str], upload_resume: bool = True) -> dict:
         return await self._request(
             "POST",

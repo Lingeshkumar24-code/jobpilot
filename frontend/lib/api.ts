@@ -471,6 +471,36 @@ export const api = {
   applicationStats: () =>
     request<ApplicationStats>("/api/v1/applications/stats"),
   applicationScreenshot: (id: string) => requestBlob(`/api/v1/applications/${id}/screenshot`),
+  applicationBrowserFrame: (id: string) => requestBlob(`/api/v1/applications/${id}/browser-frame`),
+  applicationBrowserStreamTicket: (id: string) =>
+    request<{ ticket: string; expires_at: string }>(`/api/v1/applications/${id}/browser-stream-ticket`, { method: "POST" }),
+  applicationBrowserStreamUrl: (id: string, ticket: string) => {
+    const url = new URL(`/api/v1/applications/${id}/browser-stream`, API_BASE || window.location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", ticket);
+    return url.toString();
+  },
+  openBrowserSearch: (provider: "google" | "linkedin" | "indeed", query: string) =>
+    request<{ session_id: string; provider: string; query: string; url: string; title: string; ticket: string; expires_at: string }>(
+      "/api/v1/browser/search/open",
+      json({ provider, query }),
+    ),
+  driveBrowserSearch: (ticket: string, allowScreenshotToOpenRouter: boolean) =>
+    request<{
+      provider: string;
+      query: string;
+      steps: { action: string; target: string; reason: string }[];
+      outcome: string;
+      url: string | null;
+      title: string | null;
+      screenshot: { mime: string; base64: string } | null;
+    }>("/api/v1/browser/search/drive", json({ ticket, max_actions: 6, allow_screenshot_to_openrouter: allowScreenshotToOpenRouter })),
+  browserSearchStreamUrl: (ticket: string) => {
+    const url = new URL("/api/v1/browser/search/stream", API_BASE || window.location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", ticket);
+    return url.toString();
+  },
 
   listAgentRuns: () =>
     request<{ runs: AgentRun[]; total: number }>("/api/v1/agents/runs"),

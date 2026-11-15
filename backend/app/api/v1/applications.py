@@ -5,8 +5,14 @@ application, one-time approval and executed by the isolated browser worker.
 from __future__ import annotations
 
 import io
+import asyncio
+import contextlib
+import logging
+from datetime import datetime, timedelta, timezone
+from jose import JWTError, jwt
+from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from uuid import UUID
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
@@ -14,9 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
 from app.core.constants import APPLICATION_STATUSES
+from app.core.config import settings
 from app.core.rate_limit import limit_write
 from app.db.session import get_db
-from app.models.core import Application, ApplicationAnswer, ApplicationEvent, Approval, Job, User
+from app.models.core import Application, ApplicationAnswer, ApplicationEvent, Approval, BrowserSession, Job, User
 from app.schemas.application import (
     AnswerOut,
     AnswerUpdate,
@@ -36,8 +43,96 @@ from app.schemas.application import (
 from app.services import applications as app_service
 from app.services.serializers import application_detail, application_out
 from app.services.storage import StorageError, storage
+from app.services.browser_client import BrowserClient, BrowserWorkerError, decode_screenshot
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+@router.post("/{application_id}/browser-stream-ticket")
+async def browser_stream_ticket(
+    application_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    app = await app_service.get_application(db, current_user.id, application_id)
+    session = (
+        await db.execute(
+            select(BrowserSession)
+            .where(BrowserSession.application_id == app.id)
+            .order_by(BrowserSession.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if session is None or not session.session_ref or not session.worker_id or session.status == "BLOCKED":
+        raise HTTPException(status_code=404, detail="Live browser session is not available.")
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+    ticket = jwt.encode(
+        {
+            "typ": "browser_stream",
+            "sub": str(current_user.id),
+            "application_id": str(app.id),
+            "session_id": session.session_ref,
+            "worker_id": session.worker_id,
+            "exp": expires_at,
+        },
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+    return {"ticket": ticket, "expires_at": expires_at.isoformat()}
+
+
+@router.websocket("/{application_id}/browser-stream")
+async def browser_stream(websocket: WebSocket, application_id: UUID):
+    raw_ticket = websocket.query_params.get("ticket", "")
+    try:
+        claims = jwt.decode(raw_ticket, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        if claims.get("typ") != "browser_stream" or claims.get("application_id") != str(application_id):
+            raise JWTError("Invalid browser stream ticket")
+        worker_id = claims["worker_id"].rstrip("/")
+        worker_parts = urlsplit(worker_id)
+        if worker_parts.hostname == "localhost":
+            netloc = f"127.0.0.1:{worker_parts.port}" if worker_parts.port else "127.0.0.1"
+            worker_id = urlunsplit((worker_parts.scheme, netloc, worker_parts.path, "", ""))
+        session_id = claims["session_id"]
+    except (JWTError, KeyError, TypeError):
+        await websocket.close(code=4401, reason="Invalid or expired browser stream ticket")
+        return
+
+    await websocket.accept()
+    try:
+        from websockets.asyncio.client import connect as websocket_connect
+
+        async with websocket_connect(
+            f"{worker_id.replace('http://', 'ws://').replace('https://', 'wss://')}/v1/sessions/{session_id}/stream",
+            additional_headers={"X-Worker-Secret": settings.BROWSER_WORKER_SECRET},
+            max_size=8 * 1024 * 1024,
+        ) as upstream:
+            async def worker_to_user():
+                while True:
+                    await websocket.send_text(await upstream.recv())
+
+            async def user_to_worker():
+                while True:
+                    await upstream.send(await websocket.receive_text())
+
+            tasks = [asyncio.create_task(worker_to_user()), asyncio.create_task(user_to_worker())]
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if not task.cancelled() and task.exception():
+                        raise task.exception()
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Browser stream proxy failed for application %s", application_id)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Browser stream ended")
 
 
 async def _job(db: AsyncSession, job_id) -> Job:
@@ -428,6 +523,38 @@ async def get_screenshot(
         data = await storage.get(key)
     except StorageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="image/png",
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.get("/{application_id}/browser-frame")
+async def application_browser_frame(
+    application_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    app = await app_service.get_application(db, current_user.id, application_id)
+    session = (
+        await db.execute(
+            select(BrowserSession)
+            .where(BrowserSession.application_id == app.id)
+            .order_by(BrowserSession.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if session is None or not session.session_ref or session.status == "BLOCKED":
+        raise HTTPException(status_code=404, detail="Live browser session is not available.")
+    client = BrowserClient(base_url=session.worker_id)
+    try:
+        payload = await client.screenshot(session.session_ref)
+    except BrowserWorkerError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    data = decode_screenshot(payload.get("screenshot"))
+    if not data:
+        raise HTTPException(status_code=502, detail="Browser worker returned no screenshot.")
     return StreamingResponse(
         io.BytesIO(data),
         media_type="image/png",

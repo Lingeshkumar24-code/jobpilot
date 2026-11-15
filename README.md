@@ -7,6 +7,8 @@ applications — every submission requires your explicit, application-specific
 approval.
 
 See **PROGRESS.md** for what's built so far and what's next.
+The current browser search workflow and its screenshots are documented in
+[`docs/browser-search-workflow.md`](docs/browser-search-workflow.md).
 
 ## Stack
 
@@ -37,13 +39,15 @@ Do not paste API keys into source files or commit `.env`.
 - n8n: http://localhost:5678
 - Browser worker: http://localhost:8100 (not started by default in prod)
 
-Job discovery uses configured public feeds and career-board APIs; OpenRouter
-interprets search text but does not search the web. The app does not crawl
-Google Jobs, LinkedIn, Indeed, or Naukri pages. It only opens the application
-URL returned by an enabled source. Add board/API access only where you are
-authorized to use it. Browser form filling stops for login, CAPTCHA, or
-unsupported required fields. Every submission remains blocked until the user
-reviews that specific application and explicitly approves it.
+Job discovery uses configured public feeds and career-board APIs. Google,
+LinkedIn, and Indeed can also be opened in an isolated, user-controlled search
+browser; this does not scrape their pages or bypass sign-in/CAPTCHA controls.
+The Nemotron visual browser option sends screenshots to OpenRouter only after
+the user opts in, and stops before personal-data entry or final submission.
+Add official provider API credentials only where you are authorized to use
+them. Form filling stops for login, CAPTCHA, or unsupported required fields.
+Every submission remains blocked until the user reviews that specific
+application and explicitly approves it.
 
 The root module under `infra/terraform` targets ECS/RDS and can create
 cost-incurring NAT Gateway, ALB, RDS, and Fargate resources. It is not a free

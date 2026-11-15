@@ -1,3 +1,8 @@
+FROM node:24-bookworm-slim AS agent-browser-deps
+WORKDIR /opt/agent-browser
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
 FROM mcr.microsoft.com/playwright/python:v1.63.0-jammy
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -5,6 +10,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
+
+COPY --from=agent-browser-deps /usr/local/bin/node /usr/local/bin/node
+COPY --from=agent-browser-deps /opt/agent-browser/node_modules ./node_modules
+ENV NODE_BINARY=/usr/local/bin/node \
+    AGENT_BROWSER_SCRIPT=/app/node_modules/agent-browser/bin/agent-browser.js
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

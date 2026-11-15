@@ -7,8 +7,13 @@ bytes, and submissions require an explicit per-application approval.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +23,7 @@ from app.api.v1 import (
     agents,
     applications,
     auth,
+    browser,
     automation,
     jobs,
     matches,
@@ -130,6 +136,7 @@ app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
 app.include_router(matches.router, prefix="/api/v1/matches", tags=["matches"])
 app.include_router(applications.router, prefix="/api/v1/applications", tags=["applications"])
+app.include_router(browser.router, prefix="/api/v1/browser", tags=["browser"])
 app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
 app.include_router(automation.router, prefix="/api/v1/automation", tags=["automation"])
 app.include_router(settings_router.router, prefix="/api/v1/settings", tags=["settings"])

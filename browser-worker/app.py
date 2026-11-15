@@ -16,9 +16,13 @@ import logging
 import os
 import contextlib
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 import httpx
 
@@ -129,6 +133,20 @@ class AnalyzeRequest(BaseModel):
     resume: ResumePayload | None = None
 
 
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=3, max_length=500)
+    limit: int = Field(default=25, ge=1, le=50)
+
+
+class BrowserSearchRequest(BaseModel):
+    provider: Literal["google", "linkedin", "indeed"]
+    query: str = Field(min_length=3, max_length=500)
+
+
+class BrowserActionRequest(BaseModel):
+    event: dict[str, Any]
+
+
 class FillRequest(BaseModel):
     values: dict[str, str] = Field(default_factory=dict)
     upload_resume: bool = True
@@ -155,6 +173,34 @@ async def health() -> dict[str, Any]:
 @app.get("/v1/status", dependencies=[Depends(require_secret)])
 async def status() -> dict[str, Any]:
     return await automation.stats()
+
+
+@app.post("/v1/search/google", dependencies=[Depends(require_secret)])
+async def search_google(payload: SearchRequest) -> dict[str, Any]:
+    try:
+        return await automation.search_google(payload.query, payload.limit)
+    except WorkerError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.post("/v1/browser/search", dependencies=[Depends(require_secret)])
+async def open_browser_search(payload: BrowserSearchRequest) -> dict[str, Any]:
+    try:
+        result = await automation.open_job_search(payload.provider, payload.query)
+        if WORKER_URL:
+            result["worker_url"] = WORKER_URL
+        await set_ecs_task_protection(True)
+        return result
+    except WorkerError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.post("/v1/browser/search/{session_id}/action", dependencies=[Depends(require_secret)])
+async def browser_search_action(session_id: str, payload: BrowserActionRequest) -> dict[str, Any]:
+    try:
+        return await automation.browser_action(session_id, payload.event)
+    except WorkerError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
 
 @app.post("/v1/sessions/analyze", dependencies=[Depends(require_secret)])
@@ -186,6 +232,30 @@ async def fill(session_id: str, payload: FillRequest) -> dict[str, Any]:
         return await automation.fill(session_id, payload.values, payload.upload_resume)
     except WorkerError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.get("/v1/sessions/{session_id}/screenshot", dependencies=[Depends(require_secret)])
+async def screenshot(session_id: str) -> dict[str, Any]:
+    try:
+        return {"screenshot": await automation.screenshot(session_id)}
+    except WorkerError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.websocket("/v1/sessions/{session_id}/stream")
+async def browser_stream(websocket: WebSocket, session_id: str) -> None:
+    supplied = websocket.headers.get("x-worker-secret")
+    if not WORKER_SECRET or not supplied or not hmac.compare_digest(WORKER_SECRET, supplied):
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+    await websocket.accept()
+    try:
+        await automation.browser_stream(session_id, websocket)
+    except WorkerError as exc:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=4400 + min(max(exc.status, 0), 99), reason=str(exc)[:120])
+    except WebSocketDisconnect:
+        pass
 
 
 @app.post("/v1/sessions/{session_id}/submit", dependencies=[Depends(require_secret)])

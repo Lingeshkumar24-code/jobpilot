@@ -54,6 +54,22 @@ been deployed or verified.
   - `test_unknown_submission_status_is_not_reported_as_confirmed` (refuses to fabricate confirmations)
   - `test_required_unknown_field_is_flagged` (stops when unsupported required inputs are present)
   - `test_ssrf_guard_blocks_private_addresses` (blocks internal IP navigation)
+- Live End-to-End Browser Automation (`test_live_e2e_flow.py`): **100% PASSED (15/15 stages verified)**:
+  - 1. Started live mock employer application portal on `127.0.0.1:8765/apply`.
+  - 2. Initialized database schema and headless Playwright Chromium worker engine.
+  - 3. Registered candidate (`Arjun Sharma`, `arjun.sharma@example.com`).
+  - 4. Populated candidate profile (4 yrs experience, skills, location).
+  - 5. Uploaded and parsed resume DOCX attachment (`Arjun_Sharma_Resume.docx`).
+  - 6. Discovered target job opening (`AI Engineer` at `Acme Robotics`) with match score **94.1%** (4/4 matched skills).
+  - 7. Created application tracking record (`bff0b36d-a4f8-4b8d-8b2d-7f9ef3ecbb59`).
+  - 8. Browser worker opened employer page, extracted DOM fields, generated structured answers, captured initial screenshot (`screenshot_1_form_analyzed.png`).
+  - 9. Candidate reviewed answers and explicitly checked required privacy policy consent checkbox.
+  - 10. Playwright filled all 8 form inputs (Name, Email, Phone, Country, Cover letter, attached resume binary) and verified zero validation errors (`screenshot_2_form_filled.png`).
+  - 11. Tested submission safety guard without approval: blocked with HTTP 409 Conflict.
+  - 12. Requested application approval token (issued with 1-hour expiration).
+  - 13. Candidate approved application; generated cryptographic HMAC-SHA256 one-time signed proof with unique nonce.
+  - 14. Browser worker clicked submit with proof, verified employer receipt, detected employer reference number `F121BB81` on confirmation page (`screenshot_3_submission_confirmed.png`), updated status to `CONFIRMED`.
+  - 15. Tested duplicate submission replay with the same proof: blocked with HTTP 409 Conflict.
 - Frontend verification:
   - TypeScript type check (`npx tsc --noEmit`): **0 errors**
   - Production build (`npm run build`): **Compiled successfully (15/15 static routes generated)**

@@ -27,6 +27,8 @@ os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["CORS_ORIGINS"] = "http://localhost:3000"
 os.environ["ENVIRONMENT"] = "development"
 os.environ["GEMINI_API_KEY"] = ""
+os.environ["OPENROUTER_API_KEY"] = ""
+os.environ["FIRECRAWL_API_KEY"] = ""
 os.environ["OLLAMA_BASE_URL"] = ""
 os.environ["N8N_WEBHOOK_BASE_URL"] = ""
 

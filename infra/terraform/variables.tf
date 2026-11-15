@@ -90,6 +90,20 @@ variable "n8n_webhook_secret" {
   }
 }
 
+variable "firecrawl_api_key" {
+  description = "Optional Firecrawl API key for public web job discovery."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "openrouter_api_key" {
+  description = "Optional OpenRouter API key for LLM structured search/parsing."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "public_origin" {
   description = "Browser origin of the deployed frontend, e.g. https://app.example.com. Used for CORS and cookie policy."
   type        = string

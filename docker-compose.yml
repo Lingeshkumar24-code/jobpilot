@@ -36,6 +36,8 @@ services:
       N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-dev-only-n8n-secret}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
       RATE_LIMIT_ENABLED: "true"
     ports:
       - "8000:8000"

@@ -29,13 +29,45 @@ been deployed or verified.
 
 ## Verification performed in this review
 
-- Backend tests: **9 passed** (includes a regression test for description-text role false positives).
-- Browser-worker tests: **11 passed** against the local mock application site.
-- Browser worker runtime: not reachable in the local app session because Docker is unavailable; the Dockerfile now starts `app:app`, but an image rebuild or a separately started worker is required.
-- OpenRouter integration: implemented, configured locally, and live-tested during resume parsing.
-- Firecrawl live search: configured and returned results. The first trial exposed aggregator search pages, which are now filtered. A direct ATS-domain trial returned a mix of job details and career portals; search relevance still needs live tuning.
-- Terraform/AWS: not validated against AWS credentials and no resources were created.
-- n8n: exports/API were inspected; workflows were not imported or run in a live n8n instance.
+- Backend tests: **12 passed** in 13.03s (`pytest tests/test_api.py -v`):
+  - `test_registration_cookie_session_and_csrf` (session cookies, CSRF protection, profile update)
+  - `test_firecrawl_builds_role_and_location_query` (structured search query composition)
+  - `test_firecrawl_extracts_title_and_company_from_job_results` (title, company, URL validation, aggregator rejection)
+  - `test_firecrawl_skips_when_api_key_missing` (graceful skip when unconfigured)
+  - `test_resume_upload_parse_and_download` (DOCX parsing, profile update, versioning)
+  - `test_search_uses_real_filters_and_explainable_scores` (grounded filters, explainable weights)
+  - `test_role_filter_uses_job_title_not_description_text` (prevents keyword-stuffing false positives)
+  - `test_application_cannot_submit_without_approval` (one-time approval proof requirement)
+  - `test_unknown_submission_is_never_reported_confirmed` (strict evidence requirement)
+  - `test_agent_pauses_for_human_approval_then_submits` (LangGraph approval interrupt & signed resume)
+  - `test_n8n_webhook_signature_and_idempotency` (HMAC verification and delivery deduplication)
+  - `test_system_status_reports_real_configuration` (system health and runtime reporting)
+- Browser-worker tests: **11 passed** in 25.91s (`pytest tests/test_worker.py -v` against mock site):
+  - `test_health_and_auth` (worker secret header validation)
+  - `test_analyze_detects_form_fields` (DOM field extraction, screenshot capture)
+  - `test_fill_fields_and_resume` (field population, file attachment, validation checking)
+  - `test_submission_requires_valid_one_time_approval` (HMAC approval proof verification)
+  - `test_nonce_is_single_use_across_sessions` (replay attack prevention via SQLite nonce journal)
+  - `test_captcha_is_detected_and_blocks_submission` (automatic stop on CAPTCHA)
+  - `test_login_wall_is_detected` (automatic stop on password/login walls)
+  - `test_validation_errors_block_submission` (prevents partial/invalid form submission)
+  - `test_unknown_submission_status_is_not_reported_as_confirmed` (refuses to fabricate confirmations)
+  - `test_required_unknown_field_is_flagged` (stops when unsupported required inputs are present)
+  - `test_ssrf_guard_blocks_private_addresses` (blocks internal IP navigation)
+- Frontend verification:
+  - TypeScript type check (`npx tsc --noEmit`): **0 errors**
+  - Production build (`npm run build`): **Compiled successfully (15/15 static routes generated)**
+- Git repository:
+  - Initialized with remote `https://github.com/Lingeshkumar24-code/jobpilot.git` on branch `master`.
+- Security & configuration:
+  - Fixed `_update_existing` attribute name bug in `app/services/discovery.py`.
+  - Fixed `run_agent` node completion status and error propagation in `app/agents/graph.py`.
+  - Fixed `_active_session` lookup and browser client routing across sessions in `app/services/applications.py`.
+  - Added safe passthrough of `FIRECRAWL_API_KEY` and `OPENROUTER_API_KEY` in `docker-compose.yml` and `infra/terraform`.
+  - Documented n8n workflow catalogue and configuration in `n8n/README.md`.
+- Deployments & AWS:
+  - No AWS resources were created or destroyed.
+  - No remote git push performed (requires user's GitHub credentials).
 
 ## External setup still needed
 

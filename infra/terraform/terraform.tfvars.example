@@ -10,6 +10,10 @@ approval_signing_secret = ""
 browser_worker_secret   = ""
 n8n_webhook_secret      = ""
 
+# Optional AI search credentials
+firecrawl_api_key  = ""
+openrouter_api_key = ""
+
 # Optional HTTPS. Create/validate the certificate in ACM first.
 acm_certificate_arn = ""
 

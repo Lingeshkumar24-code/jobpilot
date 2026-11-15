@@ -85,6 +85,8 @@ resource "aws_ecs_task_definition" "backend" {
         { name = "APPROVAL_SIGNING_SECRET", valueFrom = aws_ssm_parameter.secrets["APPROVAL_SIGNING_SECRET"].arn },
         { name = "BROWSER_WORKER_SECRET", valueFrom = aws_ssm_parameter.secrets["BROWSER_WORKER_SECRET"].arn },
         { name = "N8N_WEBHOOK_SECRET", valueFrom = aws_ssm_parameter.secrets["N8N_WEBHOOK_SECRET"].arn },
+        { name = "FIRECRAWL_API_KEY", valueFrom = aws_ssm_parameter.secrets["FIRECRAWL_API_KEY"].arn },
+        { name = "OPENROUTER_API_KEY", valueFrom = aws_ssm_parameter.secrets["OPENROUTER_API_KEY"].arn },
       ]
 
       healthCheck = {

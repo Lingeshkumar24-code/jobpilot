@@ -20,7 +20,12 @@ out/
 *.tfstate.backup
 *.tfvars
 
-# OS / editor
+# Logs and local state
+*.log
+var/
+backend/var/
+*.db
+*.sqlite3
 .DS_Store
 .vscode/
 .idea/

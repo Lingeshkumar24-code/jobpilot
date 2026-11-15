@@ -430,7 +430,7 @@ async def fill_application(
     session = await _active_session(db, app)
     if session is None:
         raise HTTPException(status_code=409, detail="Browser session expired. Inspect the form again.")
-    client = client or BrowserClient(base_url=session.worker_id or settings.BROWSER_WORKER_URL)
+    client = client or (browser_client if type(browser_client) is not BrowserClient else BrowserClient(base_url=session.worker_id or settings.BROWSER_WORKER_URL))
     answers = await _answers(db, app)
     missing = [
         a.field_label or a.field_name
@@ -690,7 +690,7 @@ async def submit_application(
     session = await _active_session(db, app)
     if session is None:
         raise HTTPException(status_code=409, detail="Browser session expired. Re-analyze and re-approve.")
-    client = client or BrowserClient(base_url=session.worker_id or settings.BROWSER_WORKER_URL)
+    client = client or (browser_client if type(browser_client) is not BrowserClient else BrowserClient(base_url=session.worker_id or settings.BROWSER_WORKER_URL))
 
     app.submission_attempts += 1
     await _event(db, app, "submission_attempt", actor="browser", payload={"attempt": app.submission_attempts})
@@ -890,7 +890,11 @@ async def _active_session(db: AsyncSession, app: Application) -> BrowserSession 
     return (
         await db.execute(
             select(BrowserSession)
-            .where(BrowserSession.application_id == app.id)
+            .where(
+                BrowserSession.application_id == app.id,
+                BrowserSession.session_ref == session_id,
+                BrowserSession.status.in_(["ANALYZED", "FILLED"]),
+            )
             .order_by(BrowserSession.created_at.desc())
             .limit(1)
         )

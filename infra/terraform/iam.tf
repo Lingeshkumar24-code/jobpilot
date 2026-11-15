@@ -7,6 +7,8 @@ locals {
     APPROVAL_SIGNING_SECRET = var.approval_signing_secret
     BROWSER_WORKER_SECRET   = var.browser_worker_secret
     N8N_WEBHOOK_SECRET      = var.n8n_webhook_secret
+    FIRECRAWL_API_KEY       = var.firecrawl_api_key != "" ? var.firecrawl_api_key : "disabled"
+    OPENROUTER_API_KEY      = var.openrouter_api_key != "" ? var.openrouter_api_key : "disabled"
   }
 }
 

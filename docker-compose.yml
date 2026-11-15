@@ -1,0 +1,104 @@
+# Local development / demo stack. Production uses ECS Fargate (see
+# infra/terraform). Every value here is a development default; override it in
+# a local .env file. No credential in this file is valid outside localhost.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: jobpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobpilot}
+      POSTGRES_DB: jobpilot
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobpilot -d jobpilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment: &backend-env
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql+asyncpg://jobpilot:${POSTGRES_PASSWORD:-jobpilot}@postgres:5432/jobpilot
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-before-sharing}
+      APPROVAL_SIGNING_SECRET: ${APPROVAL_SIGNING_SECRET:-dev-only-approval-secret-change-before-sharing}
+      BROWSER_WORKER_SECRET: ${BROWSER_WORKER_SECRET:-dev-only-worker-secret}
+      BROWSER_WORKER_URL: http://browser-worker:8100
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_DIR: /data/storage
+      COOKIE_SECURE: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
+      N8N_WEBHOOK_BASE_URL: http://n8n:5678/webhook
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-dev-only-n8n-secret}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      RATE_LIMIT_ENABLED: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      browser-worker:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  browser-worker:
+    build: ./browser-worker
+    environment:
+      WORKER_SECRET: ${BROWSER_WORKER_SECRET:-dev-only-worker-secret}
+      APPROVAL_SIGNING_SECRET: ${APPROVAL_SIGNING_SECRET:-dev-only-approval-secret-change-before-sharing}
+      MAX_SESSIONS: "4"
+      # Never enable this outside local tests that point at a mock site.
+      ALLOW_PRIVATE_TARGETS: "false"
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    image: n8nio/n8n:1.75.2
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      GENERIC_TIMEZONE: UTC
+      # Read by the workflow Code nodes to sign inbound webhook bodies.
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-dev-only-n8n-secret}
+      JOBPILOT_API_URL: http://backend:8000
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  backend_data:
+  n8n_data:

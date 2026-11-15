@@ -1,0 +1,9 @@
+{
+  "name": "JobPilot — Workflow failure alert",
+  "nodes": [
+    {"parameters":{},"id":"c0a0d6a6-1a1a-4a01-000000000031","name":"On workflow error","type":"n8n-nodes-base.errorTrigger","typeVersion":1,"position":[220,300]},
+    {"parameters":{"jsCode":"const crypto = require('crypto');\nconst run = $json.execution || {};\nconst workflow = $json.workflow || {};\nconst body = JSON.stringify({ workflow: 'failure_handling', source_workflow: workflow.name || 'unknown', execution_id: run.id || null, error: String(run.error?.message || 'Workflow failed').slice(0,1000) });\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET is not set');\nconst signature = 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');\nconst base = $env.JOBPILOT_API_URL || 'http://backend:8000';\nreturn [{json:{body,signature,delivery:'failure-'+(run.id || Date.now()),url:base+'/api/v1/automation/webhooks/failure_handling'}}];"},"id":"c0a0d6a6-1a1a-4a01-000000000032","name":"Build signed failure event","type":"n8n-nodes-base.code","typeVersion":2,"position":[440,300]},
+    {"parameters":{"method":"POST","url":"={{ $json.url }}","sendHeaders":true,"headerParameters":{"parameters":[{"name":"X-JobPilot-Signature","value":"={{ $json.signature }}"},{"name":"X-JobPilot-Delivery","value":"={{ $json.delivery }}"}]},"sendBody":true,"contentType":"raw","rawContentType":"application/json","body":"={{ $json.body }}","options":{"timeout":60000}},"id":"c0a0d6a6-1a1a-4a01-000000000033","name":"Report failure to API","type":"n8n-nodes-base.httpRequest","typeVersion":4.2,"position":[660,300]}
+  ],
+  "connections":{"On workflow error":{"main":[[{"node":"Build signed failure event","type":"main","index":0}]]},"Build signed failure event":{"main":[[{"node":"Report failure to API","type":"main","index":0}]]}},"settings":{"executionOrder":"v1","saveManualExecutions":true},"active":false,"pinData":{}
+}

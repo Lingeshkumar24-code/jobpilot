@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and fill in real values. Never commit terraform.tfvars.
+aws_region      = "ap-south-1"
+environment     = "prod"
+public_origin   = "https://app.example.com"
+
+# Create these with: openssl rand -hex 32
+db_password             = ""
+jwt_secret              = ""
+approval_signing_secret = ""
+browser_worker_secret   = ""
+n8n_webhook_secret      = ""
+
+# Optional HTTPS. Create/validate the certificate in ACM first.
+acm_certificate_arn = ""
+
+alarm_email = ""

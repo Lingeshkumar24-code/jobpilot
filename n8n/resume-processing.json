@@ -1,0 +1,8 @@
+{
+  "name": "JobPilot — Resume processing (disabled until async API)",
+  "nodes": [
+    {"parameters":{"httpMethod":"POST","path":"jobpilot-resume-processing","responseMode":"lastNode","options":{}},"id":"c0a0d6a6-1a1a-4a01-9a01-000000000001","name":"Resume event","type":"n8n-nodes-base.webhook","typeVersion":2,"position":[220,300],"webhookId":"jobpilot-resume-processing"},
+    {"parameters":{"jsCode":"throw new Error('Resume processing is synchronous in the API. This workflow is intentionally disabled until a durable asynchronous resume-processing endpoint exists.');"},"id":"c0a0d6a6-1a1a-4a01-9a01-000000000002","name":"Not enabled — API parses synchronously","type":"n8n-nodes-base.code","typeVersion":2,"position":[440,300]}
+  ],
+  "connections":{"Resume event":{"main":[[{"node":"Not enabled — API parses synchronously","type":"main","index":0}]]}},"settings":{"executionOrder":"v1","saveManualExecutions":true},"active":false,"pinData":{}
+}

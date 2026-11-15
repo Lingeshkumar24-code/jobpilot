@@ -1,0 +1,77 @@
+{
+  "name": "JobPilot — Daily digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "b0a0d6a6-1a1a-4a01-9a01-000000000001",
+      "name": "Every day at 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst body = JSON.stringify({ workflow: 'daily_digest' });\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET is not set on n8n');\nconst signature = 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');\nconst base = $env.JOBPILOT_API_URL || 'http://backend:8000';\nreturn [{ json: { body, signature, delivery: 'digest-' + Date.now(), url: base + '/api/v1/automation/webhooks/daily_digest' } }];"
+      },
+      "id": "b0a0d6a6-1a1a-4a01-9a01-000000000002",
+      "name": "Sign webhook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-JobPilot-Signature",
+              "value": "={{ $json.signature }}"
+            },
+            {
+              "name": "X-JobPilot-Delivery",
+              "value": "={{ $json.delivery }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "b0a0d6a6-1a1a-4a01-9a01-000000000003",
+      "name": "Start digest agent runs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    }
+  ],
+  "connections": {
+    "Every day at 08:00": {
+      "main": [[{ "node": "Sign webhook", "type": "main", "index": 0 }]]
+    },
+    "Sign webhook": {
+      "main": [[{ "node": "Start digest agent runs", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "pinData": {}
+}

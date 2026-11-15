@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Design tokens — "flight instrument panel" direction.
+  Light theme (default) is a cool slate, not warm cream, to avoid the
+  generic AI-dashboard look. Dark theme (.dark) is the primary intended
+  experience for a tool people glance at while a background agent works.
+*/
+:root {
+  --ink: #f2f4f7;
+  --panel: #ffffff;
+  --panel-raised: #ffffff;
+  --line: #dde2ea;
+  --paper: #141821;
+  --muted: #5b6472;
+  --amber: #c27c1f;
+  --signal: #1c8f7e;
+  --danger: #c23b35;
+}
+
+.dark {
+  --ink: #10141c;
+  --panel: #171d28;
+  --panel-raised: #1d2430;
+  --line: #262e3c;
+  --paper: #e7eaf0;
+  --muted: #8893a6;
+  --amber: #e8a33d;
+  --signal: #3fb8a6;
+  --danger: #e2605a;
+}
+
+body {
+  background-color: var(--ink);
+  color: var(--paper);
+}
+
+/* Visible keyboard focus everywhere — not optional */
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

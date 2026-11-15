@@ -1,0 +1,68 @@
+name: Deploy
+
+on:
+  workflow_dispatch: # manual trigger only — no auto-deploy to production
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write # GitHub OIDC -> AWS, no static keys
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production # requires a GitHub Environment approval gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        env:
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          IMAGE_TAG: ${{ github.sha }}
+          API_BASE: ${{ vars.PUBLIC_API_BASE }}
+        run: |
+          set -eu
+          for tag in "$IMAGE_TAG" latest; do
+            docker build -t "$ECR_REGISTRY/jobpilot-backend:$tag" backend
+            docker push "$ECR_REGISTRY/jobpilot-backend:$tag"
+
+            docker build -t "$ECR_REGISTRY/jobpilot-browser-worker:$tag" browser-worker
+            docker push "$ECR_REGISTRY/jobpilot-browser-worker:$tag"
+
+            docker build \
+              --build-arg NEXT_PUBLIC_API_BASE="$API_BASE" \
+              -t "$ECR_REGISTRY/jobpilot-frontend:$tag" frontend
+            docker push "$ECR_REGISTRY/jobpilot-frontend:$tag"
+          done
+
+      - name: Deploy to ECS
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+        run: |
+          set -eu
+          # Task definitions are Terraform-managed and use the mutable
+          # `latest` tag, so a forced deployment picks up the new images.
+          for service in browser-worker backend frontend; do
+            aws ecs update-service --cluster "$CLUSTER" --service "$service" \
+              --force-new-deployment
+            aws ecs wait services-stable --cluster "$CLUSTER" --services "$service"
+          done
+
+      - name: Verify deployment health
+        env:
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: curl --fail --show-error --silent --retry 10 --retry-delay 6 "$HEALTH_URL/health/ready"

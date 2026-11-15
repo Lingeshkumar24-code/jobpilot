@@ -1,0 +1,76 @@
+{
+  "name": "JobPilot — Refresh job discovery",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "b0a0d6a6-1a1a-4a01-9a01-000000000011",
+      "name": "Every 6 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst body = JSON.stringify({ workflow: 'refresh_jobs' });\nconst secret = $env.N8N_WEBHOOK_SECRET;\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET is not set on n8n');\nconst signature = 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex');\nconst base = $env.JOBPILOT_API_URL || 'http://backend:8000';\nreturn [{ json: { body, signature, delivery: 'refresh-' + Date.now(), url: base + '/api/v1/automation/webhooks/refresh_jobs' } }];"
+      },
+      "id": "b0a0d6a6-1a1a-4a01-9a01-000000000012",
+      "name": "Sign webhook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-JobPilot-Signature",
+              "value": "={{ $json.signature }}"
+            },
+            {
+              "name": "X-JobPilot-Delivery",
+              "value": "={{ $json.delivery }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "b0a0d6a6-1a1a-4a01-9a01-000000000013",
+      "name": "Refresh jobs and rescore",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    }
+  ],
+  "connections": {
+    "Every 6 hours": {
+      "main": [[{ "node": "Sign webhook", "type": "main", "index": 0 }]]
+    },
+    "Sign webhook": {
+      "main": [[{ "node": "Refresh jobs and rescore", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "pinData": {}
+}
